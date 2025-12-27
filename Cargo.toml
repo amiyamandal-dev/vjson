@@ -1,0 +1,27 @@
+[package]
+name = "vjson"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vjson"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+serde_json = "1.0"    # JSON serialization
+hnsw_rs = "0.3.3"     # HNSW approximate nearest neighbor
+serde = { version = "1.0", features = ["derive"] }
+parking_lot = "0.12"  # High-performance RwLock (2-3x faster than std)
+memmap2 = "0.9"       # Memory-mapped file I/O
+thiserror = "1.0"     # Ergonomic error handling
+rayon = "1.10"        # Data parallelism for vector loading and hybrid search
+ahash = "0.8"         # Fast, DoS-resistant hashing
+tantivy = "0.22"      # Full-text search engine
+tempfile = "3.0"      # Temporary directories for tests
+regex = "1.10"        # Regular expression support for filters
+smallvec = "1.11"     # Stack-allocated vectors for small result sets
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
