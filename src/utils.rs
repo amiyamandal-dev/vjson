@@ -88,77 +88,8 @@ pub fn normalize_vectors(vectors: &[Vec<f32>]) -> Vec<Vec<f32>> {
 /// Returns value in range [-1, 1], where 1 is most similar
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-
-    // Use platform-specific SIMD for large vectors
-    #[cfg(target_arch = "aarch64")]
-    {
-        if a.len() >= 16 {
-            return unsafe { simd::cosine_similarity_neon(a, b) };
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if a.len() >= 16 {
-            return cosine_similarity_simd(a, b);
-        }
-    }
-
-    cosine_similarity_scalar(a, b)
-}
-
-/// Scalar cosine similarity for small vectors
-#[inline]
-fn cosine_similarity_scalar(a: &[f32], b: &[f32]) -> f32 {
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let magnitude_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let magnitude_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if magnitude_a == 0.0 || magnitude_b == 0.0 {
-        return 0.0;
-    }
-
-    dot_product / (magnitude_a * magnitude_b)
-}
-
-/// SIMD-optimized cosine similarity
-#[allow(dead_code)]
-#[inline]
-fn cosine_similarity_simd(a: &[f32], b: &[f32]) -> f32 {
-    let (chunks_a, remainder_a) = a.as_chunks::<8>();
-    let (chunks_b, remainder_b) = b.as_chunks::<8>();
-
-    let mut dot = 0.0f32;
-    let mut mag_a = 0.0f32;
-    let mut mag_b = 0.0f32;
-
-    // Process chunks
-    for (chunk_a, chunk_b) in chunks_a.iter().zip(chunks_b.iter()) {
-        for i in 0..8 {
-            dot += chunk_a[i] * chunk_b[i];
-            mag_a += chunk_a[i] * chunk_a[i];
-            mag_b += chunk_b[i] * chunk_b[i];
-        }
-    }
-
-    // Handle remainder
-    for (x, y) in remainder_a.iter().zip(remainder_b.iter()) {
-        dot += x * y;
-        mag_a += x * x;
-        mag_b += y * y;
-    }
-
-    let magnitude_a = mag_a.sqrt();
-    let magnitude_b = mag_b.sqrt();
-
-    if magnitude_a == 0.0 || magnitude_b == 0.0 {
-        return 0.0;
-    }
-
-    dot / (magnitude_a * magnitude_b)
+    // Delegate to cross-platform SIMD implementation
+    simd::cosine_similarity_simd(a, b)
 }
 
 /// Convert L2 distance to cosine similarity for normalized vectors
@@ -168,28 +99,11 @@ pub fn l2_to_cosine_similarity(l2_distance: f32) -> f32 {
     1.0 - (l2_distance * l2_distance / 2.0)
 }
 
-/// Compute dot product between two vectors
+/// Compute dot product between two vectors - SIMD optimized
+#[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-
-    // Use platform-specific SIMD for large vectors
-    #[cfg(target_arch = "aarch64")]
-    {
-        if a.len() >= 16 {
-            return unsafe { simd::dot_product_neon(a, b) };
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") && a.len() >= 32 {
-            return unsafe { simd::dot_product_avx2(a, b) };
-        }
-    }
-
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    // Delegate to cross-platform SIMD implementation
+    simd::dot_product_simd(a, b)
 }
 
 #[cfg(test)]

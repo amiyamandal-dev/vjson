@@ -71,7 +71,6 @@ unsafe fn normalize_vector_neon(vector: &[f32]) -> Vec<f32> {
     let sum_final = vpadd_f32(sum_pair, sum_pair);
     let mut magnitude_sq = vget_lane_f32(sum_final, 0);
 
-    // Add remainder
     for i in (chunks * 4)..len {
         let val = *vector.get_unchecked(i);
         magnitude_sq += val * val;
@@ -98,7 +97,6 @@ unsafe fn normalize_vector_neon(vector: &[f32]) -> Vec<f32> {
         result.extend_from_slice(&temp);
     }
 
-    // Handle remainder
     for i in (chunks * 4)..len {
         result.push(*vector.get_unchecked(i) * inv_mag);
     }
@@ -108,7 +106,7 @@ unsafe fn normalize_vector_neon(vector: &[f32]) -> Vec<f32> {
 
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let chunks = len / 4;
 
@@ -126,7 +124,6 @@ pub unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
     let sum_final = vpadd_f32(sum_pair, sum_pair);
     let mut result = vget_lane_f32(sum_final, 0);
 
-    // Add remainder
     for i in (chunks * 4)..len {
         result += a.get_unchecked(i) * b.get_unchecked(i);
     }
@@ -136,7 +133,7 @@ pub unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
     }
@@ -172,7 +169,6 @@ pub unsafe fn cosine_similarity_neon(a: &[f32], b: &[f32]) -> f32 {
     let mag_b_final = vpadd_f32(mag_b_pair, mag_b_pair);
     let mut mag_b_sq = vget_lane_f32(mag_b_final, 0);
 
-    // Handle remainder
     for i in (chunks * 4)..len {
         let a_val = *a.get_unchecked(i);
         let b_val = *b.get_unchecked(i);
@@ -206,7 +202,6 @@ unsafe fn normalize_vector_avx2(vector: &[f32]) -> Vec<f32> {
     let mut sum_vec = _mm256_setzero_ps();
 
     let chunks = len / 8;
-    let remainder = len % 8;
 
     for i in 0..chunks {
         let offset = i * 8;
@@ -218,7 +213,6 @@ unsafe fn normalize_vector_avx2(vector: &[f32]) -> Vec<f32> {
     let sum = horizontal_sum_avx2(sum_vec);
     let mut magnitude_sq = sum;
 
-    // Add remainder
     for i in (chunks * 8)..len {
         let val = *vector.get_unchecked(i);
         magnitude_sq += val * val;
@@ -244,7 +238,6 @@ unsafe fn normalize_vector_avx2(vector: &[f32]) -> Vec<f32> {
         result.extend_from_slice(&temp);
     }
 
-    // Handle remainder
     for i in (chunks * 8)..len {
         result.push(*vector.get_unchecked(i) * inv_mag);
     }
@@ -253,6 +246,7 @@ unsafe fn normalize_vector_avx2(vector: &[f32]) -> Vec<f32> {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn horizontal_sum_avx2(v: __m256) -> f32 {
     // Extract high and low 128-bit lanes
@@ -274,7 +268,7 @@ unsafe fn horizontal_sum_avx2(v: __m256) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
-pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
+unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len().min(b.len());
     let chunks = len / 8;
 
@@ -289,7 +283,6 @@ pub unsafe fn dot_product_avx2(a: &[f32], b: &[f32]) -> f32 {
 
     let mut result = horizontal_sum_avx2(sum_vec);
 
-    // Add remainder
     for i in (chunks * 8)..len {
         result += a.get_unchecked(i) * b.get_unchecked(i);
     }
@@ -325,7 +318,6 @@ unsafe fn normalize_vector_sse(vector: &[f32]) -> Vec<f32> {
     let result_vec = _mm_add_ss(sums, shuf2);
     let mut magnitude_sq = _mm_cvtss_f32(result_vec);
 
-    // Add remainder
     for i in (chunks * 4)..len {
         let val = *vector.get_unchecked(i);
         magnitude_sq += val * val;
@@ -355,6 +347,132 @@ unsafe fn normalize_vector_sse(vector: &[f32]) -> Vec<f32> {
     }
 
     result
+}
+
+// ============================================================================
+// Cross-platform public API
+// ============================================================================
+
+/// Compute dot product using platform-specific SIMD
+#[inline]
+pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if a.len() >= 16 && b.len() >= 16 {
+            return unsafe { dot_product_neon(a, b) };
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && a.len() >= 32 && b.len() >= 32 {
+            return unsafe { dot_product_avx2(a, b) };
+        }
+    }
+
+    // Scalar fallback
+    dot_product_scalar(a, b)
+}
+
+/// Compute cosine similarity using platform-specific SIMD
+#[inline]
+pub fn cosine_similarity_simd(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if a.len() >= 16 && b.len() >= 16 {
+            return unsafe { cosine_similarity_neon(a, b) };
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && a.len() >= 32 && b.len() >= 32 {
+            return unsafe { cosine_similarity_avx2(a, b) };
+        }
+    }
+
+    // Scalar fallback
+    cosine_similarity_scalar(a, b)
+}
+
+/// Scalar dot product fallback
+#[inline]
+fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Scalar cosine similarity fallback
+#[inline]
+fn cosine_similarity_scalar(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f32;
+    let mut mag_a = 0.0f32;
+    let mut mag_b = 0.0f32;
+
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        mag_a += x * x;
+        mag_b += y * y;
+    }
+
+    let magnitude_a = mag_a.sqrt();
+    let magnitude_b = mag_b.sqrt();
+
+    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (magnitude_a * magnitude_b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let len = a.len();
+    let chunks = len / 8;
+
+    let mut dot_vec = _mm256_setzero_ps();
+    let mut mag_a_vec = _mm256_setzero_ps();
+    let mut mag_b_vec = _mm256_setzero_ps();
+
+    for i in 0..chunks {
+        let offset = i * 8;
+        let a_vec = _mm256_loadu_ps(a.as_ptr().add(offset));
+        let b_vec = _mm256_loadu_ps(b.as_ptr().add(offset));
+
+        dot_vec = _mm256_fmadd_ps(a_vec, b_vec, dot_vec);
+        mag_a_vec = _mm256_fmadd_ps(a_vec, a_vec, mag_a_vec);
+        mag_b_vec = _mm256_fmadd_ps(b_vec, b_vec, mag_b_vec);
+    }
+
+    let mut dot = horizontal_sum_avx2(dot_vec);
+    let mut mag_a_sq = horizontal_sum_avx2(mag_a_vec);
+    let mut mag_b_sq = horizontal_sum_avx2(mag_b_vec);
+
+    for i in (chunks * 8)..len {
+        let a_val = *a.get_unchecked(i);
+        let b_val = *b.get_unchecked(i);
+        dot += a_val * b_val;
+        mag_a_sq += a_val * a_val;
+        mag_b_sq += b_val * b_val;
+    }
+
+    let magnitude_a = mag_a_sq.sqrt();
+    let magnitude_b = mag_b_sq.sqrt();
+
+    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (magnitude_a * magnitude_b)
 }
 
 #[cfg(test)]
