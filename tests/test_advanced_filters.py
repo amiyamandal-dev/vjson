@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test advanced metadata filtering"""
 
+import os
 import random
 import shutil
 import tempfile
@@ -228,12 +229,10 @@ def test_advanced_filters():
         print("  ✓ Multiple filters (implicit AND)")
 
     finally:
-        # Cleanup
-        shutil.rmtree(temp_dir)
-        print(f"\nCleaned up: {temp_dir}")
-
-        shutil.rmtree(temp_dir)
-        print(f"\nCleaned up: {temp_dir}")
+        # Cleanup - ignore errors from locked Tantivy index files
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"\nCleaned up: {temp_dir}")
 
 if __name__ == "__main__":
     test_advanced_filters()

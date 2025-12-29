@@ -2,6 +2,7 @@
 """Test all new features: batch ops, range search, normalization, stats, incremental updates"""
 
 import math
+import os
 import random
 import shutil
 import tempfile
@@ -145,7 +146,7 @@ def test_all_new_features():
         try:
             db.update_metadata("nonexistent", {"test": "fail"})
             assert False, "Should have raised error"
-        except RuntimeError as e:
+        except (RuntimeError, vjson.NotFoundError) as e:
             print(f"✓ Update non-existent ID failed as expected: {str(e)[:50]}")
 
         # ========== TEST 7: Cosine Similarity with Normalized Vectors ==========
@@ -242,11 +243,10 @@ def test_all_new_features():
         print("  ✓ Large-scale range search")
 
     finally:
-        shutil.rmtree(temp_dir)
-        print(f"\nCleaned up: {temp_dir}")
-
-        shutil.rmtree(temp_dir)
-        print(f"\nCleaned up: {temp_dir}")
+        # Cleanup - ignore errors from locked Tantivy index files
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"\nCleaned up: {temp_dir}")
 
 if __name__ == "__main__":
     test_all_new_features()
