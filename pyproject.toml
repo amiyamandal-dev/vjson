@@ -4,10 +4,69 @@ build-backend = "maturin"
 
 [project]
 name = "vjson"
+description = "High-performance vector database with HNSW indexing and hybrid search"
+authors = [{ name = "Amiya Mandal", email = "amiyamandal.dev@gmail.com" }]
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.8"
+keywords = ["vector", "database", "hnsw", "search", "embeddings", "similarity", "tantivy"]
 classifiers = [
-    "Programming Language :: Rust",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+    "numpy>=1.20",
+    "maturin>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/amiyamandal-dev/vjson"
+Repository = "https://github.com/amiyamandal-dev/vjson"
+Documentation = "https://github.com/amiyamandal-dev/vjson#readme"
+Issues = "https://github.com/amiyamandal-dev/vjson/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "vjson.vjson"
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.8"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

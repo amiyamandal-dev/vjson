@@ -104,7 +104,7 @@ impl Filter {
             Filter::Exists { key, exists } => {
                 let found = get_nested_value(metadata, key).is_some();
                 found == *exists
-            }
+            },
 
             Filter::StartsWith { key, prefix } => get_nested_value(metadata, key)
                 .and_then(|v| v.as_str())
@@ -130,7 +130,7 @@ impl Filter {
                 } else {
                     false
                 }
-            }
+            },
 
             Filter::And(filters) => filters.iter().all(|f| f.matches(metadata)),
 
@@ -151,7 +151,7 @@ fn get_nested_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
         match current {
             Value::Object(map) => {
                 current = map.get(part)?;
-            }
+            },
             _ => return None,
         }
     }

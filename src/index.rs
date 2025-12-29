@@ -134,7 +134,7 @@ mod tests {
             Err(VectorDbError::DimensionMismatch { expected, actual }) => {
                 assert_eq!(expected, 128);
                 assert_eq!(actual, 64);
-            }
+            },
             _ => panic!("Expected DimensionMismatch error"),
         }
     }

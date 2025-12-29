@@ -85,7 +85,7 @@ def test_crud_operations():
         try:
             db.update("nonexistent", vector1, {"test": "fail"})
             assert False, "Should have raised error"
-        except RuntimeError as e:
+        except vjson.NotFoundError as e:
             print(f"✓ Update non-existent vector failed as expected: {str(e)[:50]}")
 
         print("\n=== DELETE Operations ===")
@@ -100,7 +100,7 @@ def test_crud_operations():
         try:
             db.delete("nonexistent")
             assert False, "Should have raised error"
-        except RuntimeError as e:
+        except vjson.NotFoundError as e:
             print(f"✓ Delete non-existent vector failed as expected: {str(e)[:50]}")
 
         # Batch delete

@@ -206,6 +206,74 @@ impl StorageLayer {
         Ok(())
     }
 
+    /// Load a single vector by index (O(1) with mmap)
+    /// Much more efficient than loading all vectors
+    pub fn load_vector_by_index(&self, index: usize) -> Result<Vec<f32>> {
+        if !std::path::Path::new(&self.vector_file).exists() {
+            return Err(VectorDbError::NotFound(format!(
+                "Vector at index {}",
+                index
+            )));
+        }
+
+        let file = File::open(&self.vector_file)?;
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+
+        let bytes_per_vector = self.dimension * 4;
+        let offset = index * bytes_per_vector;
+
+        if offset + bytes_per_vector > mmap.len() {
+            return Err(VectorDbError::NotFound(format!(
+                "Vector at index {}",
+                index
+            )));
+        }
+
+        let chunk = &mmap[offset..offset + bytes_per_vector];
+        let mut vec = Vec::with_capacity(self.dimension);
+
+        for i in 0..self.dimension {
+            let bytes = &chunk[i * 4..(i + 1) * 4];
+            let val = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            vec.push(val);
+        }
+
+        Ok(vec)
+    }
+
+    /// Load multiple vectors by indices (batch version, still O(n) where n = indices.len())
+    pub fn load_vectors_by_indices(&self, indices: &[usize]) -> Result<Vec<(usize, Vec<f32>)>> {
+        if !std::path::Path::new(&self.vector_file).exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(&self.vector_file)?;
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+
+        let bytes_per_vector = self.dimension * 4;
+        let max_index = mmap.len() / bytes_per_vector;
+
+        let results: Vec<(usize, Vec<f32>)> = indices
+            .iter()
+            .filter(|&&idx| idx < max_index)
+            .map(|&idx| {
+                let offset = idx * bytes_per_vector;
+                let chunk = &mmap[offset..offset + bytes_per_vector];
+                let mut vec = Vec::with_capacity(self.dimension);
+
+                for i in 0..self.dimension {
+                    let bytes = &chunk[i * 4..(i + 1) * 4];
+                    let val = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    vec.push(val);
+                }
+
+                (idx, vec)
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Clear all data efficiently
     pub fn clear(&self) -> Result<()> {
         // Truncate files to zero length (faster than writing empty content)

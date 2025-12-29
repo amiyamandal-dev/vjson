@@ -1,0 +1,14 @@
+# Rustfmt configuration for vjson
+
+# Use 2021 edition defaults
+edition = "2021"
+
+# Max line width
+max_width = 100
+
+# Use spaces for indentation
+hard_tabs = false
+tab_spaces = 4
+
+# Use field init shorthand
+use_field_init_shorthand = true

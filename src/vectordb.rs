@@ -488,23 +488,31 @@ impl VectorDB {
 
     /// Get vectors for multiple IDs in batch
     /// Returns a vector of (id, vector) pairs for found items
+    /// Optimized: loads only requested vectors, not all vectors
     pub fn get_vectors_batch(&self, ids: &[String]) -> Result<Vec<(String, Vec<f32>)>> {
-        use rayon::prelude::*;
-
         let id_map = self.id_map.read();
         let storage = self.storage.read();
-        let all_vectors = storage.load_vectors()?;
 
-        let results: Vec<(String, Vec<f32>)> = ids
-            .par_iter()
-            .filter_map(|id| {
-                id_map.get(id).and_then(|&internal_id| {
-                    if internal_id < all_vectors.len() {
-                        Some((id.clone(), all_vectors[internal_id].clone()))
-                    } else {
-                        None
-                    }
-                })
+        // Collect internal IDs and their corresponding external IDs
+        let id_pairs: Vec<(String, usize)> = ids
+            .iter()
+            .filter_map(|id| id_map.get(id).map(|&internal_id| (id.clone(), internal_id)))
+            .collect();
+
+        // Get just the internal indices
+        let indices: Vec<usize> = id_pairs.iter().map(|(_, idx)| *idx).collect();
+
+        // Load only the vectors we need
+        let loaded = storage.load_vectors_by_indices(&indices)?;
+
+        // Build a map from internal_id -> vector for quick lookup
+        let loaded_map: std::collections::HashMap<usize, Vec<f32>> = loaded.into_iter().collect();
+
+        // Map back to external IDs
+        let results: Vec<(String, Vec<f32>)> = id_pairs
+            .into_iter()
+            .filter_map(|(ext_id, internal_id)| {
+                loaded_map.get(&internal_id).map(|v| (ext_id, v.clone()))
             })
             .collect();
 
@@ -727,21 +735,16 @@ impl VectorDB {
     }
 
     /// Get vector by ID (if needed for updates/verification)
+    /// Optimized: loads only the requested vector using mmap, not all vectors
     pub fn get_vector(&self, id: &str) -> Result<Vec<f32>> {
         let id_map = self.id_map.read();
         let internal_id = id_map
             .get(id)
             .ok_or_else(|| VectorDbError::NotFound(id.to_string()))?;
 
-        // Load from storage
+        // Load single vector from storage (O(1) with mmap)
         let storage = self.storage.read();
-        let vectors = storage.load_vectors()?;
-
-        if *internal_id < vectors.len() {
-            Ok(vectors[*internal_id].clone())
-        } else {
-            Err(VectorDbError::NotFound(id.to_string()))
-        }
+        storage.load_vector_by_index(*internal_id)
     }
 
     /// Rebuild index from current data (useful after many deletes/updates)

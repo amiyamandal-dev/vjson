@@ -1,0 +1,13 @@
+# Clippy configuration for vjson
+
+# Allow some things that are common in FFI/PyO3 code
+avoid-breaking-exported-api = false
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 30
+
+# Allow slightly longer functions for PyO3 bindings
+too-many-arguments-threshold = 8
+
+# Type complexity threshold
+type-complexity-threshold = 300

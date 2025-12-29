@@ -8,12 +8,60 @@ mod tantivy_index;
 mod utils;
 mod vectordb;
 
+use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use pyo3::{create_exception, PyErr};
 use std::sync::Arc;
 
+use error::VectorDbError;
 use filter::Filter;
 use vectordb::{SearchResult, VectorDB};
+
+// Define custom Python exceptions
+create_exception!(
+    vjson,
+    VjsonError,
+    PyException,
+    "Base exception for vjson errors"
+);
+create_exception!(
+    vjson,
+    DimensionMismatchError,
+    VjsonError,
+    "Vector dimension does not match database dimension"
+);
+create_exception!(
+    vjson,
+    NotFoundError,
+    VjsonError,
+    "Vector with specified ID was not found"
+);
+create_exception!(
+    vjson,
+    StorageError,
+    VjsonError,
+    "Storage I/O error occurred"
+);
+create_exception!(
+    vjson,
+    InvalidParameterError,
+    VjsonError,
+    "Invalid parameter provided"
+);
+
+/// Convert VectorDbError to appropriate Python exception
+fn to_py_err(e: VectorDbError) -> PyErr {
+    match e {
+        VectorDbError::DimensionMismatch { expected, actual } => DimensionMismatchError::new_err(
+            format!("Dimension mismatch: expected {}, got {}", expected, actual),
+        ),
+        VectorDbError::NotFound(id) => NotFoundError::new_err(format!("Not found: {}", id)),
+        VectorDbError::Io(e) => StorageError::new_err(format!("Storage error: {}", e)),
+        VectorDbError::Json(e) => InvalidParameterError::new_err(format!("JSON error: {}", e)),
+        VectorDbError::InvalidParameter(msg) => InvalidParameterError::new_err(msg),
+    }
+}
 
 /// Python wrapper for VectorDB
 #[pyclass]
@@ -38,8 +86,8 @@ impl PyVectorDB {
         max_elements: usize,
         ef_construction: usize,
     ) -> PyResult<Self> {
-        let db = VectorDB::new(&path, dimension, max_elements, ef_construction)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let db =
+            VectorDB::new(&path, dimension, max_elements, ef_construction).map_err(to_py_err)?;
 
         Ok(Self { db: Arc::new(db) })
     }
@@ -53,9 +101,7 @@ impl PyVectorDB {
     fn insert(&self, py: Python, id: String, vector: Vec<f32>, metadata: PyObject) -> PyResult<()> {
         let meta_json = python_to_json_value(py, &metadata)?;
 
-        self.db
-            .insert(id, vector, meta_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.insert(id, vector, meta_json).map_err(to_py_err)
     }
 
     /// Insert multiple vectors in a batch (much faster than individual inserts)
@@ -91,9 +137,7 @@ impl PyVectorDB {
             }
         }
 
-        self.db
-            .insert_batch(converted_items)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.insert_batch(converted_items).map_err(to_py_err)
     }
 
     /// Insert a vector with text content for hybrid search
@@ -115,7 +159,7 @@ impl PyVectorDB {
 
         self.db
             .insert_with_text(id, vector, text, meta_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+            .map_err(to_py_err)
     }
 
     /// Search for k nearest neighbors with optional metadata filter
@@ -162,7 +206,7 @@ impl PyVectorDB {
         let results = self
             .db
             .search_filtered(&query, k, ef_search, parsed_filter.as_ref())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            .map_err(to_py_err)?;
 
         search_results_to_python(py, results)
     }
@@ -187,7 +231,7 @@ impl PyVectorDB {
         let results = self
             .db
             .batch_search(&queries, k, ef_search)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            .map_err(to_py_err)?;
 
         let py_list = PyList::empty_bound(py);
         for result_set in results {
@@ -200,10 +244,7 @@ impl PyVectorDB {
 
     /// Get metadata for a specific vector ID
     fn get_metadata(&self, py: Python, id: String) -> PyResult<PyObject> {
-        let metadata = self
-            .db
-            .get_metadata(&id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let metadata = self.db.get_metadata(&id).map_err(to_py_err)?;
 
         json_value_to_python(py, &metadata.data)
     }
@@ -215,23 +256,17 @@ impl PyVectorDB {
 
     /// Load existing data from storage and rebuild index
     fn load(&self) -> PyResult<()> {
-        self.db
-            .load()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.load().map_err(to_py_err)
     }
 
     /// Save all data to storage (vectors and metadata are auto-saved on insert)
     fn save(&self) -> PyResult<()> {
-        self.db
-            .save()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.save().map_err(to_py_err)
     }
 
     /// Clear all data from the database
     fn clear(&self) -> PyResult<()> {
-        self.db
-            .clear()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.clear().map_err(to_py_err)
     }
 
     /// Check if database is empty
@@ -248,9 +283,7 @@ impl PyVectorDB {
     fn update(&self, py: Python, id: String, vector: Vec<f32>, metadata: PyObject) -> PyResult<()> {
         let meta_json = python_to_json_value(py, &metadata)?;
 
-        self.db
-            .update(id, vector, meta_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.update(id, vector, meta_json).map_err(to_py_err)
     }
 
     /// Update a vector with text content
@@ -272,7 +305,7 @@ impl PyVectorDB {
 
         self.db
             .update_with_text(id, vector, text, meta_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+            .map_err(to_py_err)
     }
 
     /// Delete a vector by ID
@@ -280,9 +313,7 @@ impl PyVectorDB {
     /// Args:
     ///     id: Vector ID to delete
     fn delete(&self, id: String) -> PyResult<()> {
-        self.db
-            .delete(&id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.delete(&id).map_err(to_py_err)
     }
 
     /// Delete multiple vectors in a batch
@@ -290,9 +321,7 @@ impl PyVectorDB {
     /// Args:
     ///     ids: List of vector IDs to delete
     fn delete_batch(&self, ids: Vec<String>) -> PyResult<()> {
-        self.db
-            .delete_batch(&ids)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.delete_batch(&ids).map_err(to_py_err)
     }
 
     /// Check if a vector ID exists
@@ -314,17 +343,13 @@ impl PyVectorDB {
     /// Returns:
     ///     Vector as a list of floats
     fn get_vector(&self, id: String) -> PyResult<Vec<f32>> {
-        self.db
-            .get_vector(&id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.get_vector(&id).map_err(to_py_err)
     }
 
     /// Rebuild the HNSW index from current data
     /// Useful after many deletes/updates to reclaim space and optimize performance
     fn rebuild_index(&self) -> PyResult<()> {
-        self.db
-            .rebuild_index()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.rebuild_index().map_err(to_py_err)
     }
 
     /// Get metadata for multiple IDs in batch
@@ -357,10 +382,7 @@ impl PyVectorDB {
     /// Returns:
     ///     List of dicts with 'id' and 'vector' keys (only for found IDs)
     fn get_vectors_batch(&self, py: Python, ids: Vec<String>) -> PyResult<PyObject> {
-        let results = self
-            .db
-            .get_vectors_batch(&ids)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let results = self.db.get_vectors_batch(&ids).map_err(to_py_err)?;
 
         let py_list = PyList::empty_bound(py);
         for (id, vector) in results {
@@ -393,7 +415,7 @@ impl PyVectorDB {
         let results = self
             .db
             .range_search(&query, max_distance, ef_search)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            .map_err(to_py_err)?;
 
         search_results_to_python(py, results)
     }
@@ -423,9 +445,7 @@ impl PyVectorDB {
     fn update_metadata(&self, py: Python, id: String, metadata: PyObject) -> PyResult<()> {
         let meta_json = python_to_json_value(py, &metadata)?;
 
-        self.db
-            .update_metadata(id, meta_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
+        self.db.update_metadata(id, meta_json).map_err(to_py_err)
     }
 
     /// Full-text search using Tantivy
@@ -437,10 +457,7 @@ impl PyVectorDB {
     /// Returns:
     ///     List of tuples (id, score)
     fn text_search(&self, py: Python, query: String, limit: usize) -> PyResult<PyObject> {
-        let results = self
-            .db
-            .text_search(&query, limit)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+        let results = self.db.text_search(&query, limit).map_err(to_py_err)?;
 
         let py_list = PyList::empty_bound(py);
         for (id, score) in results {
@@ -493,13 +510,13 @@ impl PyVectorDB {
                     "Unknown strategy: {}. Use 'rrf', 'weighted', 'max', 'min', or 'average'",
                     strategy
                 )))
-            }
+            },
         };
 
         let results = self
             .db
             .hybrid_search(&query_vector, &query_text, k, ef_search, fusion_strategy)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+            .map_err(to_py_err)?;
 
         let py_list = PyList::empty_bound(py);
         for result in results {
@@ -647,7 +664,7 @@ fn parse_filter(py: Python, filter_dict: &PyObject) -> PyResult<Filter> {
                                     )
                                 })?,
                             }
-                        }
+                        },
                         "$startsWith" => Filter::StartsWith {
                             key: key.clone(),
                             prefix: op_val
@@ -697,7 +714,7 @@ fn parse_filter(py: Python, filter_dict: &PyObject) -> PyResult<Filter> {
                                 "Unknown operator: {}",
                                 op
                             )))
-                        }
+                        },
                     };
                     filters.push(filter);
                 }
@@ -793,11 +810,30 @@ fn dot_product(a: Vec<f32>, b: Vec<f32>) -> f32 {
 /// - Memory-mapped file I/O for large datasets
 #[pymodule]
 fn vjson(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Add main class
     m.add_class::<PyVectorDB>()?;
+
+    // Add utility functions
     m.add_function(wrap_pyfunction!(normalize_vector, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_vectors, m)?)?;
     m.add_function(wrap_pyfunction!(cosine_similarity, m)?)?;
     m.add_function(wrap_pyfunction!(dot_product, m)?)?;
+
+    // Add custom exceptions
+    m.add("VjsonError", m.py().get_type_bound::<VjsonError>())?;
+    m.add(
+        "DimensionMismatchError",
+        m.py().get_type_bound::<DimensionMismatchError>(),
+    )?;
+    m.add("NotFoundError", m.py().get_type_bound::<NotFoundError>())?;
+    m.add("StorageError", m.py().get_type_bound::<StorageError>())?;
+    m.add(
+        "InvalidParameterError",
+        m.py().get_type_bound::<InvalidParameterError>(),
+    )?;
+
+    // Add version
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
     Ok(())
 }

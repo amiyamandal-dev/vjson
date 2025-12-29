@@ -2,6 +2,14 @@
 name = "vjson"
 version = "0.1.0"
 edition = "2021"
+authors = ["Amiya Mandal <amiyamandal.dev@gmail.com>"]
+description = "High-performance vector database with HNSW indexing and hybrid search"
+license = "MIT"
+repository = "https://github.com/amiyamandal-dev/vjson"
+homepage = "https://github.com/amiyamandal-dev/vjson"
+keywords = ["vector", "database", "hnsw", "search", "embeddings"]
+categories = ["database", "science", "algorithms"]
+readme = "README.md"
 
 [lib]
 name = "vjson"

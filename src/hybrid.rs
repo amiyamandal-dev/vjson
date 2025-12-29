@@ -48,7 +48,7 @@ pub fn hybrid_search(
     match strategy {
         FusionStrategy::ReciprocalRankFusion { k } => {
             reciprocal_rank_fusion(&vector_results, &text_results, k, top_k)
-        }
+        },
         FusionStrategy::WeightedSum {
             vector_weight,
             text_weight,
