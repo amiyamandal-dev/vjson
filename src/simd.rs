@@ -19,10 +19,10 @@ pub fn normalize_vector_simd(vector: &[f32]) -> Vec<f32> {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && vector.len() >= 32 {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && vector.len() >= 16 {
             return unsafe { normalize_vector_avx2(vector) };
         }
-        if is_x86_feature_detected!("sse2") && vector.len() >= 16 {
+        if is_x86_feature_detected!("sse2") && vector.len() >= 8 {
             return unsafe { normalize_vector_sse(vector) };
         }
     }
@@ -356,16 +356,18 @@ unsafe fn normalize_vector_sse(vector: &[f32]) -> Vec<f32> {
 /// Compute dot product using platform-specific SIMD
 #[inline]
 pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+
     #[cfg(target_arch = "aarch64")]
     {
-        if a.len() >= 16 && b.len() >= 16 {
+        if len >= 8 {
             return unsafe { dot_product_neon(a, b) };
         }
     }
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && a.len() >= 32 && b.len() >= 32 {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && len >= 16 {
             return unsafe { dot_product_avx2(a, b) };
         }
     }
@@ -377,16 +379,21 @@ pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
 /// Compute cosine similarity using platform-specific SIMD
 #[inline]
 pub fn cosine_similarity_simd(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let len = a.len();
+
     #[cfg(target_arch = "aarch64")]
     {
-        if a.len() >= 16 && b.len() >= 16 {
+        if len >= 8 {
             return unsafe { cosine_similarity_neon(a, b) };
         }
     }
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && a.len() >= 32 && b.len() >= 32 {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && len >= 16 {
             return unsafe { cosine_similarity_avx2(a, b) };
         }
     }

@@ -3,7 +3,7 @@ use memmap2::{MmapMut, MmapOptions};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,11 +17,15 @@ pub struct VectorMetadata {
 
 /// High-performance storage layer with optimizations:
 /// - Memory-mapped I/O for vectors (3-5x faster than buffered I/O)
-/// - Large buffers (1MB) for JSON operations
+/// - NDJSON append-only format for metadata (O(1) inserts vs O(n) rewrite)
+/// - Large buffers (1MB) for I/O operations
 /// - Parallel deserialization with Rayon
 /// - Atomic counters for lock-free counting
 /// - Pre-allocated capacity to reduce allocations
 pub struct StorageLayer {
+    /// Legacy JSON array format (for migration)
+    metadata_file_legacy: String,
+    /// New NDJSON append-only format
     metadata_file: String,
     vector_file: String,
     dimension: usize,
@@ -37,7 +41,8 @@ impl StorageLayer {
         let base = base_path.as_ref();
         std::fs::create_dir_all(base)?;
 
-        let metadata_file = base.join("metadata.json").to_string_lossy().to_string();
+        let metadata_file_legacy = base.join("metadata.json").to_string_lossy().to_string();
+        let metadata_file = base.join("metadata.ndjson").to_string_lossy().to_string();
         let vector_file = base.join("vectors.bin").to_string_lossy().to_string();
 
         // Initialize vector count by reading existing data
@@ -50,12 +55,56 @@ impl StorageLayer {
             0
         };
 
-        Ok(Self {
+        let storage = Self {
+            metadata_file_legacy,
             metadata_file,
             vector_file,
             dimension,
             vector_count: AtomicU64::new(vector_count),
-        })
+        };
+
+        // Migrate from legacy format if needed
+        storage.migrate_metadata_if_needed()?;
+
+        Ok(storage)
+    }
+
+    /// Migrate from legacy JSON array format to NDJSON append-only format
+    fn migrate_metadata_if_needed(&self) -> Result<()> {
+        let legacy_path = Path::new(&self.metadata_file_legacy);
+        let ndjson_path = Path::new(&self.metadata_file);
+
+        // If legacy exists and NDJSON doesn't, migrate
+        if legacy_path.exists() && !ndjson_path.exists() {
+            // Load from legacy format
+            let file = File::open(legacy_path)?;
+            let mut reader = BufReader::with_capacity(READ_BUFFER_SIZE, file);
+            let mut data = Vec::new();
+            reader.read_to_end(&mut data)?;
+
+            if !data.is_empty() {
+                let metadata: Vec<VectorMetadata> = serde_json::from_slice(&data)?;
+
+                // Write to NDJSON format
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(ndjson_path)?;
+                let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
+
+                for meta in &metadata {
+                    let line = serde_json::to_string(meta)?;
+                    writeln!(writer, "{}", line)?;
+                }
+                writer.flush()?;
+            }
+
+            // Remove legacy file after successful migration
+            std::fs::remove_file(legacy_path)?;
+        }
+
+        Ok(())
     }
 
     /// Save vectors using memory-mapped I/O for maximum performance
@@ -163,47 +212,48 @@ impl StorageLayer {
         Ok(vectors)
     }
 
-    /// Load metadata with large buffer and parallel JSON parsing
+    /// Load metadata from NDJSON format with streaming parsing
+    /// Each line is a separate JSON object - much more efficient for large files
     pub fn load_metadata(&self) -> Result<Vec<VectorMetadata>> {
         if !std::path::Path::new(&self.metadata_file).exists() {
             return Ok(Vec::new());
         }
 
         let file = File::open(&self.metadata_file)?;
-        let mut reader = BufReader::with_capacity(READ_BUFFER_SIZE, file);
+        let reader = BufReader::with_capacity(READ_BUFFER_SIZE, file);
 
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
-
-        if data.is_empty() {
-            return Ok(Vec::new());
+        // Parse NDJSON: one JSON object per line
+        let mut metadata = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            let meta: VectorMetadata = serde_json::from_str(&line)?;
+            metadata.push(meta);
         }
 
-        // Use serde_json streaming for better memory efficiency
-        let metadata: Vec<VectorMetadata> = serde_json::from_slice(&data)?;
         Ok(metadata)
     }
 
-    /// Save metadata with optimized buffering and atomic writes
-    /// Optimization: Write to temp file, then atomic rename
+    /// Save metadata using append-only NDJSON format
+    /// Optimization: O(1) append instead of O(n) rewrite - massive speedup for large DBs
     fn save_metadata(&self, metadata: &[VectorMetadata]) -> Result<()> {
-        // Load existing metadata
-        let mut all_metadata = self.load_metadata().unwrap_or_default();
-        all_metadata.extend_from_slice(metadata);
+        // Open file in append mode - O(1) operation
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.metadata_file)?;
 
-        // Write to temporary file with large buffer
-        let temp_file = format!("{}.tmp", self.metadata_file);
-        let file = File::create(&temp_file)?;
         let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
 
-        // Compact JSON for better I/O performance (20-30% smaller)
-        let json = serde_json::to_vec(&all_metadata)?;
-        writer.write_all(&json)?;
+        // Write each metadata entry as a separate line (NDJSON format)
+        for meta in metadata {
+            let line = serde_json::to_string(meta)?;
+            writeln!(writer, "{}", line)?;
+        }
+
         writer.flush()?;
-
-        // Atomic rename (crash-safe)
-        std::fs::rename(&temp_file, &self.metadata_file)?;
-
         Ok(())
     }
 
@@ -281,6 +331,10 @@ impl StorageLayer {
         if std::path::Path::new(&self.metadata_file).exists() {
             File::create(&self.metadata_file)?.set_len(0)?;
         }
+        // Also clear legacy file if it exists (shouldn't, but just in case)
+        if std::path::Path::new(&self.metadata_file_legacy).exists() {
+            File::create(&self.metadata_file_legacy)?.set_len(0)?;
+        }
         if std::path::Path::new(&self.vector_file).exists() {
             File::create(&self.vector_file)?.set_len(0)?;
         }
@@ -323,6 +377,8 @@ mod tests {
         let metadata = storage.load_metadata().unwrap();
         assert_eq!(metadata.len(), 2);
 
-        fs::remove_dir_all(temp_dir).unwrap();
+        // Drop storage before cleanup to release file locks
+        drop(storage);
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }

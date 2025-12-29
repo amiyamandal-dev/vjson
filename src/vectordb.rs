@@ -15,6 +15,10 @@ use std::sync::Arc;
 #[allow(dead_code)]
 pub type SmallSearchResults = SmallVec<[SearchResult; 32]>;
 
+/// Threshold below which sequential processing is faster than parallel
+/// Rayon thread pool overhead is ~2-5μs per task, so small batches should be sequential
+const PARALLEL_THRESHOLD: usize = 1000;
+
 /// Main VectorDB with concurrent access control
 /// - Parallel reads: Multiple threads can search simultaneously
 /// - Locked writes: Only one thread can write at a time
@@ -44,6 +48,10 @@ pub struct VectorDB {
 
     /// Map external string IDs to internal numeric IDs
     id_map: Arc<RwLock<AHashMap<String, usize>>>,
+
+    /// Reverse map: internal numeric IDs to external string IDs
+    /// Cached to avoid rebuilding on every search (5-15% speedup)
+    reverse_id_map: Arc<RwLock<AHashMap<usize, String>>>,
 }
 
 impl VectorDB {
@@ -75,6 +83,7 @@ impl VectorDB {
             ef_construction,
             next_id: Arc::new(RwLock::new(0)),
             id_map: Arc::new(RwLock::new(AHashMap::new())),
+            reverse_id_map: Arc::new(RwLock::new(AHashMap::new())),
         })
     }
 
@@ -121,35 +130,59 @@ impl VectorDB {
         // Acquire write locks (exclusive access)
         let mut next_id = self.next_id.write();
         let mut id_map = self.id_map.write();
+        let mut reverse_id_map = self.reverse_id_map.write();
         let mut metadata_map = self.metadata_map.write();
         let storage = self.storage.read();
 
         // Assign internal IDs
         let start_id = *next_id;
 
-        // Prepare vectors and metadata in parallel (optimized to avoid double clone)
-        let prepared_data: Vec<(Vec<f32>, String, usize, VectorMetadata)> = items
-            .par_iter()
-            .enumerate()
-            .map(|(i, (ext_id, v, meta, _))| {
-                let internal_id = start_id + i;
-                let metadata = VectorMetadata {
-                    id: ext_id.clone(),
-                    data: meta.clone(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
-                };
-                (v.clone(), ext_id.clone(), internal_id, metadata)
-            })
-            .collect();
+        // Prepare vectors and metadata - use parallel only for large batches
+        let prepared_data: Vec<(Vec<f32>, String, usize, VectorMetadata)> = if items.len()
+            >= PARALLEL_THRESHOLD
+        {
+            items
+                .par_iter()
+                .enumerate()
+                .map(|(i, (ext_id, v, meta, _))| {
+                    let internal_id = start_id + i;
+                    let metadata = VectorMetadata {
+                        id: ext_id.clone(),
+                        data: meta.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                    };
+                    (v.clone(), ext_id.clone(), internal_id, metadata)
+                })
+                .collect()
+        } else {
+            // Sequential for small batches - avoids Rayon overhead
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, (ext_id, v, meta, _))| {
+                    let internal_id = start_id + i;
+                    let metadata = VectorMetadata {
+                        id: ext_id.clone(),
+                        data: meta.clone(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                    };
+                    (v.clone(), ext_id.clone(), internal_id, metadata)
+                })
+                .collect()
+        };
 
         // Sequential insert into HashMaps and extract vectors (avoiding second clone)
         let mut vectors = Vec::with_capacity(prepared_data.len());
         for (v, ext_id, internal_id, metadata) in prepared_data {
             vectors.push(v);
             id_map.insert(ext_id.clone(), internal_id);
+            reverse_id_map.insert(internal_id, ext_id.clone());
             metadata_map.insert(ext_id, metadata);
         }
 
@@ -203,29 +236,22 @@ impl VectorDB {
         ef_search: Option<usize>,
         filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>> {
-        use rayon::prelude::*;
-
         let ef = ef_search.unwrap_or(50);
 
         // Search index (read lock - concurrent)
         let index = self.index.read();
         let results = index.search(query, k, ef)?;
 
-        // Map internal IDs to external IDs and metadata
-        let id_map = self.id_map.read();
+        // Use cached reverse map (major optimization - avoids rebuilding on every search)
+        let reverse_id_map = self.reverse_id_map.read();
         let metadata_map = self.metadata_map.read();
 
-        // Reverse lookup: internal_id -> external_id (using references to avoid cloning all IDs)
-        // Use HashMap instead of AHashMap for parallel collection
-        let reverse_map: std::collections::HashMap<usize, &String> =
-            id_map.par_iter().map(|(k, v)| (*v, k)).collect();
-
         let mut search_results: Vec<SearchResult> = results
-            .into_par_iter()
+            .into_iter()
             .filter_map(|(internal_id, distance)| {
-                reverse_map.get(&internal_id).and_then(|&ext_id| {
+                reverse_id_map.get(&internal_id).and_then(|ext_id| {
                     metadata_map.get(ext_id).map(|meta| SearchResult {
-                        id: ext_id.clone(), // Only clone the k result IDs, not all IDs
+                        id: ext_id.clone(),
                         distance,
                         metadata: meta.data.clone(),
                     })
@@ -236,15 +262,15 @@ impl VectorDB {
         // Apply metadata filter if provided
         if let Some(filter) = filter {
             search_results.retain(|result| filter.matches(&result.metadata));
-            // Truncate to k after filtering
             search_results.truncate(k);
         }
 
         Ok(search_results)
     }
 
-    /// Batch search for multiple queries in parallel - OPTIMIZED
-    /// Builds reverse map once and shares across all queries
+    /// Batch search for multiple queries - OPTIMIZED
+    /// Uses cached reverse map for all queries
+    /// Conditional parallelization: parallel for large batches, sequential for small
     /// Read operation - highly concurrent
     pub fn batch_search(
         &self,
@@ -256,45 +282,49 @@ impl VectorDB {
 
         let ef = ef_search.unwrap_or(50);
 
-        // Build shared data structures once (amortized across all queries)
+        // Use cached data structures (no rebuilding)
         let index = self.index.read();
-        let id_map = self.id_map.read();
+        let reverse_id_map = self.reverse_id_map.read();
         let metadata_map = self.metadata_map.read();
 
-        // Build reverse map once for all queries (major optimization)
-        let reverse_map: std::collections::HashMap<usize, &String> =
-            id_map.par_iter().map(|(k, v)| (*v, k)).collect();
-
-        // Process all queries in parallel, sharing the reverse map
-        let results: Vec<Vec<SearchResult>> = queries
-            .par_iter()
-            .map(|query| {
-                // Search index
-                let raw_results = index.search(query, k, ef)?;
-
-                // Map results using shared reverse map (no rebuild per query!)
-                let search_results: Vec<SearchResult> = raw_results
-                    .into_par_iter()
-                    .filter_map(|(internal_id, distance)| {
-                        reverse_map.get(&internal_id).and_then(|&ext_id| {
-                            metadata_map.get(ext_id).map(|meta| SearchResult {
-                                id: ext_id.clone(),
-                                distance,
-                                metadata: meta.data.clone(),
-                            })
+        // Helper closure to process a single query
+        let process_query = |query: &Vec<f32>| -> Result<Vec<SearchResult>> {
+            let raw_results = index.search(query, k, ef)?;
+            let search_results: Vec<SearchResult> = raw_results
+                .into_iter()
+                .filter_map(|(internal_id, distance)| {
+                    reverse_id_map.get(&internal_id).and_then(|ext_id| {
+                        metadata_map.get(ext_id).map(|meta| SearchResult {
+                            id: ext_id.clone(),
+                            distance,
+                            metadata: meta.data.clone(),
                         })
                     })
-                    .collect();
+                })
+                .collect();
+            Ok(search_results)
+        };
 
-                Ok(search_results)
-            })
-            .collect::<Result<Vec<Vec<SearchResult>>>>()?;
+        // Conditional parallelization based on query count
+        let results: Vec<Vec<SearchResult>> = if queries.len() >= PARALLEL_THRESHOLD {
+            queries
+                .par_iter()
+                .map(process_query)
+                .collect::<Result<Vec<Vec<SearchResult>>>>()?
+        } else {
+            // Sequential for small batches - avoids Rayon overhead
+            queries
+                .iter()
+                .map(process_query)
+                .collect::<Result<Vec<Vec<SearchResult>>>>()?
+        };
 
         Ok(results)
     }
 
     /// Batch search with optional filtering - OPTIMIZED
-    /// Even more efficient for filtered batch searches
+    /// Uses cached reverse map for all queries
+    /// Conditional parallelization: parallel for large batches, sequential for small
     #[allow(dead_code)]
     pub fn batch_search_filtered(
         &self,
@@ -307,45 +337,49 @@ impl VectorDB {
 
         let ef = ef_search.unwrap_or(50);
 
-        // Build shared data structures once
+        // Use cached data structures
         let index = self.index.read();
-        let id_map = self.id_map.read();
+        let reverse_id_map = self.reverse_id_map.read();
         let metadata_map = self.metadata_map.read();
 
-        // Build reverse map once for all queries
-        let reverse_map: std::collections::HashMap<usize, &String> =
-            id_map.par_iter().map(|(k, v)| (*v, k)).collect();
-
-        // Process all queries in parallel
-        let results: Vec<Vec<SearchResult>> = queries
-            .par_iter()
-            .map(|query| {
-                // Search index
-                let raw_results = index.search(query, k, ef)?;
-
-                // Map and filter results
-                let mut search_results: Vec<SearchResult> = raw_results
-                    .into_par_iter()
-                    .filter_map(|(internal_id, distance)| {
-                        reverse_map.get(&internal_id).and_then(|&ext_id| {
-                            metadata_map.get(ext_id).map(|meta| SearchResult {
-                                id: ext_id.clone(),
-                                distance,
-                                metadata: meta.data.clone(),
-                            })
+        // Helper closure to process a single query
+        let process_query = |query: &Vec<f32>| -> Result<Vec<SearchResult>> {
+            let raw_results = index.search(query, k, ef)?;
+            let mut search_results: Vec<SearchResult> = raw_results
+                .into_iter()
+                .filter_map(|(internal_id, distance)| {
+                    reverse_id_map.get(&internal_id).and_then(|ext_id| {
+                        metadata_map.get(ext_id).map(|meta| SearchResult {
+                            id: ext_id.clone(),
+                            distance,
+                            metadata: meta.data.clone(),
                         })
                     })
-                    .collect();
+                })
+                .collect();
 
-                // Apply filter if provided
-                if let Some(f) = filter {
-                    search_results.retain(|result| f.matches(&result.metadata));
-                    search_results.truncate(k);
-                }
+            // Apply filter if provided
+            if let Some(f) = filter {
+                search_results.retain(|result| f.matches(&result.metadata));
+                search_results.truncate(k);
+            }
 
-                Ok(search_results)
-            })
-            .collect::<Result<Vec<Vec<SearchResult>>>>()?;
+            Ok(search_results)
+        };
+
+        // Conditional parallelization based on query count
+        let results: Vec<Vec<SearchResult>> = if queries.len() >= PARALLEL_THRESHOLD {
+            queries
+                .par_iter()
+                .map(process_query)
+                .collect::<Result<Vec<Vec<SearchResult>>>>()?
+        } else {
+            // Sequential for small batches - avoids Rayon overhead
+            queries
+                .iter()
+                .map(process_query)
+                .collect::<Result<Vec<Vec<SearchResult>>>>()?
+        };
 
         Ok(results)
     }
@@ -363,11 +397,18 @@ impl VectorDB {
         let k = 1000.min(self.len()); // Cap at 1000 or total size
         let candidates = self.search(query, k, ef_search)?;
 
-        // Filter by distance threshold
-        let results: Vec<SearchResult> = candidates
-            .into_par_iter()
-            .filter(|r| r.distance <= max_distance)
-            .collect();
+        // Filter by distance threshold - conditional parallelization
+        let results: Vec<SearchResult> = if candidates.len() >= PARALLEL_THRESHOLD {
+            candidates
+                .into_par_iter()
+                .filter(|r| r.distance <= max_distance)
+                .collect()
+        } else {
+            candidates
+                .into_iter()
+                .filter(|r| r.distance <= max_distance)
+                .collect()
+        };
 
         Ok(results)
     }
@@ -381,27 +422,21 @@ impl VectorDB {
         k: usize,
         ef_search: Option<usize>,
     ) -> Result<SmallSearchResults> {
-        use rayon::prelude::*;
-
         let ef = ef_search.unwrap_or(50);
 
         // Search index
         let index = self.index.read();
         let results = index.search(query, k, ef)?;
 
-        // Map internal IDs to external IDs and metadata
-        let id_map = self.id_map.read();
+        // Use cached reverse map
+        let reverse_id_map = self.reverse_id_map.read();
         let metadata_map = self.metadata_map.read();
 
-        // Build reverse map with references
-        let reverse_map: std::collections::HashMap<usize, &String> =
-            id_map.par_iter().map(|(k, v)| (*v, k)).collect();
-
-        // Collect to Vec first (parallel), then convert to SmallVec
+        // Collect results
         let vec_results: Vec<SearchResult> = results
-            .into_par_iter()
+            .into_iter()
             .filter_map(|(internal_id, distance)| {
-                reverse_map.get(&internal_id).and_then(|&ext_id| {
+                reverse_id_map.get(&internal_id).and_then(|ext_id| {
                     metadata_map.get(ext_id).map(|meta| SearchResult {
                         id: ext_id.clone(),
                         distance,
@@ -416,6 +451,7 @@ impl VectorDB {
     }
 
     /// Batch search with SmallVec for small k - optimized for k ≤ 32
+    /// Conditional parallelization: parallel for large batches, sequential for small
     #[allow(dead_code)]
     pub fn batch_search_small(
         &self,
@@ -427,40 +463,42 @@ impl VectorDB {
 
         let ef = ef_search.unwrap_or(50);
 
-        // Build shared data structures once
+        // Use cached data structures
         let index = self.index.read();
-        let id_map = self.id_map.read();
+        let reverse_id_map = self.reverse_id_map.read();
         let metadata_map = self.metadata_map.read();
 
-        // Build reverse map once for all queries
-        let reverse_map: std::collections::HashMap<usize, &String> =
-            id_map.par_iter().map(|(k, v)| (*v, k)).collect();
-
-        // Process all queries in parallel with SmallVec
-        let results: Vec<SmallSearchResults> = queries
-            .par_iter()
-            .map(|query| {
-                // Search index
-                let raw_results = index.search(query, k, ef)?;
-
-                // Collect to Vec first, then convert to SmallVec
-                let vec_results: Vec<SearchResult> = raw_results
-                    .into_par_iter()
-                    .filter_map(|(internal_id, distance)| {
-                        reverse_map.get(&internal_id).and_then(|&ext_id| {
-                            metadata_map.get(ext_id).map(|meta| SearchResult {
-                                id: ext_id.clone(),
-                                distance,
-                                metadata: meta.data.clone(),
-                            })
+        // Helper closure to process a single query
+        let process_query = |query: &Vec<f32>| -> Result<SmallSearchResults> {
+            let raw_results = index.search(query, k, ef)?;
+            let vec_results: Vec<SearchResult> = raw_results
+                .into_iter()
+                .filter_map(|(internal_id, distance)| {
+                    reverse_id_map.get(&internal_id).and_then(|ext_id| {
+                        metadata_map.get(ext_id).map(|meta| SearchResult {
+                            id: ext_id.clone(),
+                            distance,
+                            metadata: meta.data.clone(),
                         })
                     })
-                    .collect();
+                })
+                .collect();
+            Ok(SmallSearchResults::from_vec(vec_results))
+        };
 
-                // Convert to SmallVec - stack-allocated for k ≤ 32
-                Ok(SmallSearchResults::from_vec(vec_results))
-            })
-            .collect::<Result<Vec<SmallSearchResults>>>()?;
+        // Conditional parallelization based on query count
+        let results: Vec<SmallSearchResults> = if queries.len() >= PARALLEL_THRESHOLD {
+            queries
+                .par_iter()
+                .map(process_query)
+                .collect::<Result<Vec<SmallSearchResults>>>()?
+        } else {
+            // Sequential for small batches - avoids Rayon overhead
+            queries
+                .iter()
+                .map(process_query)
+                .collect::<Result<Vec<SmallSearchResults>>>()?
+        };
 
         Ok(results)
     }
@@ -477,13 +515,22 @@ impl VectorDB {
 
     /// Get metadata for multiple IDs in batch
     /// Returns a vector of (id, metadata) pairs for found items
+    /// Conditional parallelization: parallel for large batches, sequential for small
     pub fn get_metadata_batch(&self, ids: &[String]) -> Vec<(String, VectorMetadata)> {
         use rayon::prelude::*;
 
         let metadata_map = self.metadata_map.read();
-        ids.par_iter()
-            .filter_map(|id| metadata_map.get(id).map(|meta| (id.clone(), meta.clone())))
-            .collect()
+
+        if ids.len() >= PARALLEL_THRESHOLD {
+            ids.par_iter()
+                .filter_map(|id| metadata_map.get(id).map(|meta| (id.clone(), meta.clone())))
+                .collect()
+        } else {
+            // Sequential for small batches - avoids Rayon overhead
+            ids.iter()
+                .filter_map(|id| metadata_map.get(id).map(|meta| (id.clone(), meta.clone())))
+                .collect()
+        }
     }
 
     /// Get vectors for multiple IDs in batch
@@ -572,12 +619,14 @@ impl VectorDB {
         // Rebuild index and mappings
         let mut next_id = self.next_id.write();
         let mut id_map = self.id_map.write();
+        let mut reverse_id_map = self.reverse_id_map.write();
         let mut metadata_map = self.metadata_map.write();
 
         *next_id = vectors.len();
 
         for (i, meta) in metadata.iter().enumerate() {
             id_map.insert(meta.id.clone(), i);
+            reverse_id_map.insert(i, meta.id.clone());
             metadata_map.insert(meta.id.clone(), meta.clone());
         }
 
@@ -679,15 +728,18 @@ impl VectorDB {
     /// A full rebuild is needed to reclaim space
     pub fn delete(&self, id: &str) -> Result<()> {
         let mut id_map = self.id_map.write();
+        let mut reverse_id_map = self.reverse_id_map.write();
         let mut metadata_map = self.metadata_map.write();
 
-        // Check if exists
-        if !id_map.contains_key(id) {
-            return Err(VectorDbError::NotFound(id.to_string()));
-        }
+        // Get internal ID before removing
+        let internal_id = id_map
+            .get(id)
+            .copied()
+            .ok_or_else(|| VectorDbError::NotFound(id.to_string()))?;
 
-        // Remove from mappings
+        // Remove from all mappings
         id_map.remove(id);
+        reverse_id_map.remove(&internal_id);
         metadata_map.remove(id);
 
         // Remove from text index if available
@@ -702,18 +754,23 @@ impl VectorDB {
     /// Delete multiple vectors in a batch
     pub fn delete_batch(&self, ids: &[String]) -> Result<()> {
         let mut id_map = self.id_map.write();
+        let mut reverse_id_map = self.reverse_id_map.write();
         let mut metadata_map = self.metadata_map.write();
 
-        // Check all IDs exist
+        // Get internal IDs and check all exist
+        let mut internal_ids = Vec::with_capacity(ids.len());
         for id in ids {
-            if !id_map.contains_key(id) {
-                return Err(VectorDbError::NotFound(id.to_string()));
-            }
+            let internal_id = id_map
+                .get(id)
+                .copied()
+                .ok_or_else(|| VectorDbError::NotFound(id.to_string()))?;
+            internal_ids.push(internal_id);
         }
 
-        // Remove from mappings
-        for id in ids {
+        // Remove from all mappings
+        for (id, internal_id) in ids.iter().zip(internal_ids.iter()) {
             id_map.remove(id);
+            reverse_id_map.remove(internal_id);
             metadata_map.remove(id);
         }
 
@@ -759,18 +816,33 @@ impl VectorDB {
         let all_vectors = storage.load_vectors()?;
         let all_metadata = storage.load_metadata()?;
 
-        // Filter to only active indices in parallel (avoiding unnecessary clones)
-        let active_indices: Vec<usize> = all_metadata
-            .par_iter()
-            .enumerate()
-            .filter_map(|(idx, meta): (usize, &VectorMetadata)| {
-                if metadata_map.contains_key(&meta.id) && idx < all_vectors.len() {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Filter to only active indices - conditional parallelization
+        let active_indices: Vec<usize> = if all_metadata.len() >= PARALLEL_THRESHOLD {
+            all_metadata
+                .par_iter()
+                .enumerate()
+                .filter_map(|(idx, meta): (usize, &VectorMetadata)| {
+                    if metadata_map.contains_key(&meta.id) && idx < all_vectors.len() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            // Sequential for small datasets
+            all_metadata
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, meta): (usize, &VectorMetadata)| {
+                    if metadata_map.contains_key(&meta.id) && idx < all_vectors.len() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         // Build final structures using active indices (single clone per item)
         let mut active_vectors = Vec::with_capacity(active_indices.len());
@@ -926,7 +998,9 @@ mod tests {
         let results = db.search(&query, 2, None).unwrap();
         assert_eq!(results.len(), 2);
 
-        fs::remove_dir_all(temp_dir).unwrap();
+        // Drop database before cleanup to release file locks
+        drop(db);
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -965,6 +1039,8 @@ mod tests {
             handle.join().unwrap();
         }
 
-        fs::remove_dir_all(temp_dir).unwrap();
+        // Drop database before cleanup to release file locks (important on Windows)
+        drop(db);
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }

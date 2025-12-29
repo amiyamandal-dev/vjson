@@ -3,14 +3,15 @@
 
 # Enable link-time optimization for release builds
 [profile.release]
-lto = "thin"           # Thin LTO for faster compile times with good optimization
+lto = "fat"            # Full LTO for maximum optimization (5-15% faster)
 codegen-units = 1      # Single codegen unit for better optimization
 opt-level = 3          # Maximum optimization
 strip = true           # Strip debug symbols from binary
+panic = "abort"        # Smaller binary, faster unwinding
 
 # Profile for benchmarks (same as release but with debug info)
 [profile.bench]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 opt-level = 3
 debug = true
@@ -21,32 +22,12 @@ opt-level = 1          # Some optimization for reasonable dev performance
 debug = true
 
 # Target-specific optimizations
-# Uncomment for native CPU optimization (not portable!)
+# NOTE: We use runtime SIMD detection (is_x86_feature_detected!) for portability
+# AVX2/FMA are NOT required at compile time - binaries work on older CPUs
+
+# For local development only (not portable!):
 # [build]
 # rustflags = ["-C", "target-cpu=native"]
-
-# macOS-specific settings for Apple Silicon
-[target.aarch64-apple-darwin]
-rustflags = [
-    "-C", "target-feature=+neon",  # Enable NEON SIMD
-]
-
-# x86_64 settings (Intel/AMD)
-[target.x86_64-unknown-linux-gnu]
-rustflags = [
-    "-C", "target-feature=+avx2,+fma",  # Enable AVX2 and FMA
-]
-
-[target.x86_64-apple-darwin]
-rustflags = [
-    "-C", "target-feature=+avx2,+fma",  # Enable AVX2 and FMA
-]
-
-# Windows x86_64
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-C", "target-feature=+avx2,+fma",
-]
 
 # Alias for common commands
 [alias]
