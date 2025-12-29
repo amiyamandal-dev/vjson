@@ -75,9 +75,10 @@ impl StorageLayer {
         let bytes_per_vector = self.dimension * 4; // f32 = 4 bytes
         let total_bytes = vectors.len() * bytes_per_vector;
 
-        // Open file and extend to required size
+        // Open file and extend to required size (don't truncate - we're appending)
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&self.vector_file)?;

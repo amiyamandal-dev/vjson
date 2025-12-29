@@ -33,3 +33,13 @@ smallvec = "1.11"     # Stack-allocated vectors for small result sets
 [dev-dependencies]
 criterion = "0.5"
 rand = "0.8"
+
+[lints.rust]
+# Allow unexpected cfg from PyO3's create_exception! macro
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"gil-refs\"))"] }
+
+[lints.clippy]
+# False positive with PyO3 PyResult types
+useless_conversion = "allow"
+# PyO3 bindings often need many arguments
+too_many_arguments = "allow"
