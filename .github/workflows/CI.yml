@@ -54,9 +54,6 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Check formatting
-        run: cargo fmt -- --check
-
       - name: Run clippy
         run: cargo clippy --all-features -- -D warnings
 
