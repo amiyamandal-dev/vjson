@@ -281,7 +281,7 @@ jobs:
     if: needs.auto_release.outputs.should_release == 'true'
     environment:
       name: pypi
-      url: https://pypi.org/p/vjson
+      url: https://pypi.org/p/vectorjson
     permissions:
       id-token: write
     steps:
@@ -312,7 +312,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: pypi
-      url: https://pypi.org/p/vjson
+      url: https://pypi.org/p/vectorjson
     permissions:
       id-token: write
       contents: write

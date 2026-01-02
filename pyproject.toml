@@ -3,7 +3,7 @@ requires = ["maturin>=1.10,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "vjson"
+name = "vectorjson"
 description = "High-performance vector database with HNSW indexing and hybrid search"
 authors = [{ name = "Amiya Mandal", email = "amiyamandal.dev@gmail.com" }]
 readme = "README.md"
