@@ -64,6 +64,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Build and test with maturin
+        shell: bash
         run: |
           uv pip install --system maturin pytest numpy
           maturin build --release
