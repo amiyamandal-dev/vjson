@@ -272,7 +272,7 @@ jobs:
           prerelease: false
 
   # ============================================================
-  # Publish to PyPI (auto-release)
+  # Publish to PyPI (after auto-release creates a tag)
   # ============================================================
   publish:
     name: Publish to PyPI
@@ -303,23 +303,19 @@ jobs:
           verbose: true
 
   # ============================================================
-  # Publish on tag push (manual release)
+  # Publish on manual tag push
   # ============================================================
   publish_on_tag:
     name: Publish (Tag)
     needs: [linux, windows, macos, sdist]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     environment:
       name: pypi
       url: https://pypi.org/p/vectorjson
     permissions:
       id-token: write
-      contents: write
-      attestations: write
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -329,17 +325,6 @@ jobs:
 
       - name: List packages
         run: ls -lhR dist/
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: "dist/*"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
